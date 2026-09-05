@@ -10,6 +10,10 @@ builder.Services.AddScoped<IDbServices, DbServices>();
 builder.Services.AddTransient<IEndpoint, NaaEndPoints>();
 builder.Services.AddHealthChecks();
 builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SupportNonNullableReferenceTypes();
+});
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
@@ -22,6 +26,16 @@ app.UseForwardedHeaders();
 if (!app.Environment.IsDevelopment())
 {
     app.UseHsts();
+}
+else
+{
+    app.UseSwagger();
+    app.UseSwaggerUI(options =>
+    {
+        options.SwaggerEndpoint("/swagger/v1/swagger.json", "NAA Database API v1");
+        options.DocumentTitle = "NAA Database API 測試";
+        options.DisplayRequestDuration();
+    });
 }
 
 app.UseHttpsRedirection();
