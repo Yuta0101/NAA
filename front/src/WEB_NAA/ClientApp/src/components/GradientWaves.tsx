@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import * as THREE from "three";
 import "./GradientWaves.css";
 
@@ -29,6 +29,10 @@ interface GradientWavesProps {
 }
 
 const steps: Record<Detail, number> = { low: 40, medium: 70, high: 110 };
+const NORMAL_FRAME_INTERVAL = 1000 / 30;
+const CONSTRAINED_FRAME_INTERVAL = 1000 / 24;
+const NORMAL_PIXEL_BUDGET = 1_100_000;
+const CONSTRAINED_PIXEL_BUDGET = 550_000;
 
 const vertexShader = `
   in vec3 position;
@@ -145,7 +149,7 @@ const fragmentShader = `
   }
 `;
 
-export default function GradientWaves({
+function GradientWaves({
   horizonColor = "#5227ff",
   waveColor = "#ff9ffc",
   crestColor = "#ffffff",
@@ -174,13 +178,36 @@ export default function GradientWaves({
     const container = containerRef.current;
     if (!container) return;
 
-    const renderer = new THREE.WebGLRenderer({
-      alpha: true,
-      antialias: false,
-      premultipliedAlpha: false,
-      powerPreference: "high-performance",
-    });
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({
+        alpha: true,
+        antialias: false,
+        premultipliedAlpha: false,
+        powerPreference: "high-performance",
+      });
+    } catch {
+      // The static CSS gradient remains visible when WebGL is unavailable.
+      return;
+    }
     renderer.setClearColor(0x000000, 0);
+
+    const gl = renderer.getContext();
+    const debugInfo = gl.getExtension("WEBGL_debug_renderer_info");
+    const rendererName = debugInfo
+      ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL))
+      : "";
+    const deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
+    const constrainedDevice =
+      navigator.hardwareConcurrency <= 4 ||
+      (deviceMemory !== undefined && deviceMemory <= 4) ||
+      /swiftshader|llvmpipe|software|microsoft basic render/i.test(rendererName);
+    const frameInterval = constrainedDevice
+      ? CONSTRAINED_FRAME_INTERVAL
+      : NORMAL_FRAME_INTERVAL;
+    const pixelBudget = constrainedDevice
+      ? CONSTRAINED_PIXEL_BUDGET
+      : NORMAL_PIXEL_BUDGET;
 
     const uniforms = {
       iTime: { value: 0 },
@@ -195,7 +222,7 @@ export default function GradientWaves({
       uZoom: { value: zoom },
       uHeight: { value: height },
       uFogDepth: { value: fogDepth },
-      uSteps: { value: steps[detail] },
+      uSteps: { value: constrainedDevice ? Math.min(steps[detail], steps.low) : steps[detail] },
       uBrightness: { value: brightness },
       uOpacity: { value: opacity },
       uGrain: { value: grain ? 1 : 0 },
@@ -234,14 +261,24 @@ export default function GradientWaves({
     let frameId = 0;
     let visible = true;
     let documentVisible = !document.hidden;
+    let lastRenderAt = 0;
+    let renderedWidth = 0;
+    let renderedHeight = 0;
     const startedAt = performance.now();
 
     const resize = () => {
       const rect = container.getBoundingClientRect();
       const width = Math.max(1, Math.floor(rect.width));
       const viewHeight = Math.max(1, Math.floor(rect.height));
-      const budgetRatio = Math.sqrt(1_600_000 / (width * viewHeight));
-      const pixelRatio = Math.max(1, Math.min(window.devicePixelRatio || 1, 1.5, budgetRatio));
+      if (width === renderedWidth && viewHeight === renderedHeight) return;
+      renderedWidth = width;
+      renderedHeight = viewHeight;
+      const budgetRatio = Math.sqrt(pixelBudget / (width * viewHeight));
+      const minimumPixelRatio = constrainedDevice ? 0.5 : 0.7;
+      const pixelRatio = Math.max(
+        minimumPixelRatio,
+        Math.min(window.devicePixelRatio || 1, 1.25, budgetRatio),
+      );
       renderer.setPixelRatio(pixelRatio);
       renderer.setSize(width, viewHeight, false);
       renderer.getDrawingBufferSize(drawingBufferSize);
@@ -259,9 +296,16 @@ export default function GradientWaves({
     const onPointerLeave = () => pointerTarget.set(0.5, 0.5);
 
     const render = (time: number) => {
+      if (time - lastRenderAt < frameInterval) {
+        frameId = window.requestAnimationFrame(render);
+        return;
+      }
+      lastRenderAt = time;
       uniforms.iTime.value = (time - startedAt) * 0.001;
-      pointerCurrent.lerp(pointerTarget, 0.05);
-      uniforms.uMouse.value.copy(pointerCurrent);
+      if (mouseInteraction) {
+        pointerCurrent.lerp(pointerTarget, 0.08);
+        uniforms.uMouse.value.copy(pointerCurrent);
+      }
       renderer.render(scene, camera);
       frameId = window.requestAnimationFrame(render);
     };
@@ -315,3 +359,5 @@ export default function GradientWaves({
 
   return <div ref={containerRef} className={`gradient-waves-container ${className}`.trim()} />;
 }
+
+export default memo(GradientWaves);

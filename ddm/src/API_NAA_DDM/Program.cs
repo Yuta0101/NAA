@@ -7,8 +7,30 @@ using Microsoft.AspNetCore.HttpOverrides;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole();
+builder.Logging.AddDebug();
+
+// User Secrets are preferred. This optional Git-ignored INI-style text file
+// keeps local development usable when the user-secrets directory is unavailable.
+var localSettingsPath = ResolveLocalSettingsPath(
+    builder.Environment.ContentRootPath,
+    AppContext.BaseDirectory,
+    Environment.CurrentDirectory);
+if (localSettingsPath is not null)
+{
+    builder.Configuration.AddIniFile(
+        localSettingsPath,
+        optional: false,
+        reloadOnChange: false);
+}
+
 builder.Services.AddControllers();
 builder.Services.AddHealthChecks();
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+});
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {
@@ -57,8 +79,13 @@ builder.Services.AddHttpClient<INaaHttpServices, NaaHttpServices>(client =>
 {
     client.BaseAddress = naaServiceUri;
 });
+builder.Services.AddHttpClient<ICardHttpServices, CardHttpServices>(client =>
+{
+    client.BaseAddress = naaServiceUri;
+});
 
 builder.Services.AddTransient<INaaEndPoint, NaaEndPoints>();
+builder.Services.AddTransient<INaaEndPoint, CardEndPoints>();
 
 var app = builder.Build();
 
@@ -81,7 +108,36 @@ else
 
 app.UseHttpsRedirection();
 
+app.UseResponseCompression();
 app.UseHealthChecks("/healthz");
 app.MapEndpoints();
 
 app.Run();
+
+static string? ResolveLocalSettingsPath(params string[] searchRoots)
+{
+    var configuredPath = Environment.GetEnvironmentVariable("NAA_LOCAL_SETTINGS_FILE");
+    if (!string.IsNullOrWhiteSpace(configuredPath))
+    {
+        var fullPath = Path.GetFullPath(configuredPath);
+        return File.Exists(fullPath)
+            ? fullPath
+            : throw new FileNotFoundException(
+                $"NAA_LOCAL_SETTINGS_FILE does not exist: {fullPath}", fullPath);
+    }
+
+    var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var searchRoot in searchRoots)
+    {
+        for (var directory = new DirectoryInfo(Path.GetFullPath(searchRoot));
+             directory is not null && visited.Add(directory.FullName);
+             directory = directory.Parent)
+        {
+            var candidate = Path.Combine(directory.FullName, "NAA.local.txt");
+            if (File.Exists(candidate))
+                return candidate;
+        }
+    }
+
+    return null;
+}

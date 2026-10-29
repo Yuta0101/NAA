@@ -1,0 +1,9 @@
+[ConnectionStrings]
+DefaultConnection=Server=.\SQLEXPRESS;Database=MCH_NAA;Integrated Security=True;Encrypt=True;TrustServerCertificate=True
+
+[Agent]
+Provider=AgentBuilder
+BaseUrl=https://your-agent-server/v1
+ApiKey=app-your-key
+ChatPath=chat-messages
+TimeoutSeconds=120

@@ -1,4 +1,5 @@
 import type {
+  BoundCard,
   ConversationSummary,
   HistoryTurn,
   ReviseRequest,
@@ -6,7 +7,8 @@ import type {
 } from "../types";
 
 const API_BASE = (import.meta.env.VITE_DDM_BASE_URL || "/ddm").replace(/\/$/, "");
-const REQUEST_TIMEOUT_MS = 20_000;
+// One blocking AgentBuilder request may take up to two minutes on the DDM.
+const REQUEST_TIMEOUT_MS = 150_000;
 
 type JsonObject = Record<string, unknown>;
 
@@ -79,6 +81,29 @@ export async function authenticateUser(account: string, password: string): Promi
   return authenticatedAccount;
 }
 
+export async function authenticateCard(cardUid: string): Promise<string> {
+  let response: Response;
+  try {
+    response = await fetch("/auth/card-login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cardUid }),
+    });
+  } catch {
+    throw new Error("無法連線到登入服務，請確認 Front 已啟動。");
+  }
+  const body = await readResponseBody(response);
+
+  if (!response.ok) {
+    throw new Error(readProblemDetail(body) || "此卡片尚未綁定帳號。");
+  }
+
+  if (!isObject(body)) throw new Error("登入服務回傳格式錯誤。");
+  const authenticatedAccount = readText(body, "account")?.trim();
+  if (!authenticatedAccount) throw new Error("登入服務沒有回傳帳號。");
+  return authenticatedAccount;
+}
+
 export async function getSessionAccount(): Promise<string | null> {
   const response = await fetch("/auth/session", { cache: "no-store" });
   if (response.status === 401) return null;
@@ -122,33 +147,6 @@ async function postJson(path: string, payload: unknown): Promise<{ body: unknown
   } finally {
     window.clearTimeout(timeout);
   }
-}
-
-function findAnswer(value: unknown): string | null {
-  if (typeof value === "string") return value.trim() || null;
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const result = findAnswer(item);
-      if (result) return result;
-    }
-    return null;
-  }
-  if (!isObject(value)) return null;
-
-  const preferred = ["revisedText", "answer", "response", "result", "output", "message", "data"];
-  for (const name of preferred) {
-    const child = readValue(value, [name]);
-    if (child !== undefined) {
-      const result = findAnswer(child);
-      if (result) return result;
-    }
-  }
-
-  for (const child of Object.values(value)) {
-    const result = findAnswer(child);
-    if (result) return result;
-  }
-  return null;
 }
 
 function envelopeResults(body: unknown): unknown[] {
@@ -208,7 +206,8 @@ function mapTurn(value: unknown): HistoryTurn | undefined {
 
 export async function reviseText(request: ReviseRequest): Promise<ReviseResult> {
   const { body, status } = await postJson("/ReviseText", request);
-  return { answer: findAnswer(body), status };
+  const answer = isObject(body) ? readText(body, "revisedText")?.trim() || null : null;
+  return { answer, status };
 }
 
 export async function getConversationSummaries(
@@ -262,4 +261,36 @@ export function softDeleteConversation(account: string, conversationId: string):
 
 export function restoreConversation(account: string, conversationId: string): Promise<void> {
   return mutateConversation("/RestoreConversation", account, conversationId);
+}
+
+function mapCard(value: unknown): BoundCard | undefined {
+  if (!isObject(value)) return undefined;
+  const cardId = readText(value, "cardId");
+  if (!cardId) return undefined;
+  return {
+    cardId,
+    maskedUid: readText(value, "maskedUid") || "",
+    boundAt: readDate(value, "boundAt"),
+  };
+}
+
+export async function getCards(): Promise<BoundCard[]> {
+  // The Front proxy replaces account with the signed-in account.
+  const { body } = await postJson("/GetCards", {});
+  return envelopeResults(body)
+    .map(mapCard)
+    .filter((item): item is BoundCard => item !== undefined);
+}
+
+export async function bindCard(cardUid: string): Promise<string> {
+  const { body } = await postJson("/BindCard", { cardUid });
+  const error = envelopeError(body);
+  if (error) throw new Error(error);
+  return (isObject(body) && readText(body, "description")) || "卡片綁定成功";
+}
+
+export async function unbindCard(cardId: string): Promise<void> {
+  const { body } = await postJson("/UnbindCard", { cardId });
+  const error = envelopeError(body);
+  if (error) throw new Error(error);
 }

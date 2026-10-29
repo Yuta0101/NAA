@@ -35,6 +35,7 @@ import {
 } from "./AnimatedThemeToggler";
 import { AssistantThread } from "./AssistantThread";
 import { Brand } from "./Brand";
+import { CardSettings } from "./CardSettings";
 import { NaaIcon } from "./NaaIcon";
 
 interface ChatPageProps {
@@ -243,13 +244,12 @@ export function ChatPage({ account, theme, onThemeChange, onLogout }: ChatPagePr
           {
             id: createId("assistant"),
             role: "assistant",
-            text:
-              response.answer ||
-              `DDM 已成功收到請求（HTTP ${response.status}），目前沒有 AI 回覆內容。`,
+            text: response.answer || "目前知識庫無資料",
             createdAt: new Date(),
-            tone: response.answer ? "default" : "success",
+            tone: "default",
           },
         ]);
+        setIsRunning(false);
         await refreshHistory();
       } catch (error) {
         setMessages((current) => [
@@ -262,6 +262,7 @@ export function ChatPage({ account, theme, onThemeChange, onLogout }: ChatPagePr
             tone: "error",
           },
         ]);
+        setIsRunning(false);
         await refreshHistory();
       } finally {
         setIsRunning(false);
@@ -433,18 +434,22 @@ export function ChatPage({ account, theme, onThemeChange, onLogout }: ChatPagePr
                       <strong>{accountPanel === "settings" ? "個人設定" : "使用說明"}</strong>
                     </div>
                     {accountPanel === "settings" ? (
-                      <div className="sidebar-account__details">
-                        <CircleUserRound size={26} />
-                        <dl>
-                          <div><dt>員工帳號</dt><dd>{account}</dd></div>
-                          <div><dt>使用身分</dt><dd>護理同仁</dd></div>
-                        </dl>
-                      </div>
+                      <>
+                        <div className="sidebar-account__details">
+                          <CircleUserRound size={26} />
+                          <dl>
+                            <div><dt>員工帳號</dt><dd>{account}</dd></div>
+                            <div><dt>使用身分</dt><dd>護理同仁</dd></div>
+                          </dl>
+                        </div>
+                        <CardSettings />
+                      </>
                     ) : (
                       <ol className="sidebar-account__help">
                         <li>點擊「開始新對話」建立新聊天。</li>
                         <li>從最近對話開啟過往問答紀錄。</li>
                         <li>在下方輸入問題並送出給小護天使。</li>
+                        <li>在「個人設定」綁定員工卡後，登入頁可直接刷卡登入。</li>
                       </ol>
                     )}
                   </>

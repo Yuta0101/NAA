@@ -44,29 +44,38 @@ public class DbServices : IDbServices
             WHERE USER_ACCOUNT = @Account;
             """;
 
+        string authenticatedAccount;
+        string passwordHash;
+
         try
         {
             await using var connection = new SqlConnection(_connectionString);
             await connection.OpenAsync();
             await using var command = new SqlCommand(sql, connection);
             command.Parameters.Add("@Account", SqlDbType.VarChar, 50).Value = account;
-            await using var reader = await command.ExecuteReaderAsync();
+            await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow);
 
-            if (!await reader.ReadAsync() ||
-                reader.IsDBNull(1) ||
-                !PasswordHashUtility.Verify(dto.Password, reader.GetString(1)))
+            if (!await reader.ReadAsync() || reader.IsDBNull(1))
             {
                 return GenerateErrorResponse<LoginResponseDto>(invalidCredentials);
             }
 
-            var result = new LoginResponseDto { Account = reader.GetString(0) };
-            return new[] { result }.ToResponse("登入成功", invalidCredentials);
+            authenticatedAccount = reader.GetString(0);
+            passwordHash = reader.GetString(1);
         }
         catch (SqlException ex)
         {
             _logger.LogError(ex, "Failed to authenticate account {Account}", account);
             return GenerateErrorResponse<LoginResponseDto>("登入服務暫時無法使用");
         }
+
+        // PBKDF2 is deliberately CPU intensive. Verify after releasing the SQL
+        // reader and connection so concurrent logins do not exhaust the pool.
+        if (!PasswordHashUtility.Verify(dto.Password, passwordHash))
+            return GenerateErrorResponse<LoginResponseDto>(invalidCredentials);
+
+        var result = new LoginResponseDto { Account = authenticatedAccount };
+        return new[] { result }.ToResponse("登入成功", invalidCredentials);
     }
 
     public async Task<ResponseModel<HistoryResponseDto>> SaveHistoryAsync(HistoryCreateDto dto)
@@ -257,10 +266,10 @@ public class DbServices : IDbServices
                     LastQuestionText = reader.IsDBNull(3) ? null : reader.GetString(3),
                     LastAnswerText = reader.IsDBNull(4) ? null : reader.GetString(4),
                     OriginCode = reader.IsDBNull(5) ? null : reader.GetString(5),
-                    LastMessageAt = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
+                    LastMessageAt = ReadUtcDateTime(reader, 6),
                     TurnCount = reader.GetInt32(7),
                     IsDeleted = reader.GetBoolean(8),
-                    DeletedAt = reader.IsDBNull(9) ? null : reader.GetDateTime(9),
+                    DeletedAt = ReadUtcDateTime(reader, 9),
                     DeletedBy = reader.IsDBNull(10) ? null : reader.GetString(10)
                 });
             }
@@ -329,9 +338,9 @@ public class DbServices : IDbServices
                     QuestionText = reader.IsDBNull(4) ? null : reader.GetString(4),
                     AnswerText = reader.IsDBNull(5) ? null : reader.GetString(5),
                     OriginCode = reader.IsDBNull(6) ? null : reader.GetString(6),
-                    InsertDt = reader.IsDBNull(7) ? null : reader.GetDateTime(7),
+                    InsertDt = ReadUtcDateTime(reader, 7),
                     IsDeleted = reader.GetBoolean(8),
-                    DeletedAt = reader.IsDBNull(9) ? null : reader.GetDateTime(9),
+                    DeletedAt = ReadUtcDateTime(reader, 9),
                     DeletedBy = reader.IsDBNull(10) ? null : reader.GetString(10)
                 });
             }
@@ -520,9 +529,9 @@ public class DbServices : IDbServices
         var newUserId = Guid.NewGuid().ToString();
         const string insertSql = """
             INSERT INTO dbo.USER_ACCOUNT
-                (UNIQUE_ID, INSERT_DT, INSERT_OP, USER_ACCOUNT)
+                (UNIQUE_ID, INSERT_DT, INSERT_OP, UPDATE_DT, UPDATE_OP, USER_ACCOUNT)
             VALUES
-                (@UniqueId, @InsertDt, @InsertOp, @Account);
+                (@UniqueId, @InsertDt, @InsertOp, NULL, NULL, @Account);
             """;
 
         await using var insertCommand = new SqlCommand(insertSql, connection, transaction);
@@ -545,9 +554,9 @@ public class DbServices : IDbServices
     {
         const string sql = """
             INSERT INTO dbo.QUESTIONS_RECORDS
-                (UNIQUE_ID, QUESTION_TEXT, INSERT_OP, INSERT_DT, ORIGIN_CODE)
+                (UNIQUE_ID, QUESTION_TEXT, INSERT_OP, INSERT_DT, UPDATE_DT, UPDATE_OP, ORIGIN_CODE)
             VALUES
-                (@UniqueId, @QuestionText, @InsertOp, @InsertDt, @OriginCode);
+                (@UniqueId, @QuestionText, @InsertOp, @InsertDt, NULL, NULL, @OriginCode);
             """;
 
         await using var command = new SqlCommand(sql, connection, transaction);
@@ -571,9 +580,9 @@ public class DbServices : IDbServices
     {
         const string sql = """
             INSERT INTO dbo.ANSWERS_RECORDS
-                (UNIQUE_ID, QUESTION_ID, ANSWER_TEXT, INSERT_OP, INSERT_DT, ORIGIN_CODE)
+                (UNIQUE_ID, QUESTION_ID, ANSWER_TEXT, INSERT_OP, INSERT_DT, UPDATE_DT, UPDATE_OP, ORIGIN_CODE)
             VALUES
-                (@UniqueId, @QuestionId, @AnswerText, @InsertOp, @InsertDt, @OriginCode);
+                (@UniqueId, @QuestionId, @AnswerText, @InsertOp, @InsertDt, NULL, NULL, @OriginCode);
             """;
 
         await using var command = new SqlCommand(sql, connection, transaction);
@@ -626,9 +635,9 @@ public class DbServices : IDbServices
     {
         const string sql = """
             INSERT INTO dbo.CONVERSATION_RECORDS
-                (UNIQUE_ID, CONVERSATION_ID, AGENT_THREAD_ID, USER_ID, QUESTION_ID, ANSWER_ID, CHAT_TITLE, INSERT_OP, INSERT_DT, ORIGIN_CODE, IS_DELETED)
+                (UNIQUE_ID, CONVERSATION_ID, AGENT_THREAD_ID, USER_ID, QUESTION_ID, ANSWER_ID, CHAT_TITLE, INSERT_OP, INSERT_DT, UPDATE_DT, UPDATE_OP, ORIGIN_CODE, IS_DELETED)
             VALUES
-                (@UniqueId, @ConversationId, @AgentThreadId, @UserId, @QuestionId, @AnswerId, @ChatTitle, @InsertOp, @InsertDt, @OriginCode, 0);
+                (@UniqueId, @ConversationId, @AgentThreadId, @UserId, @QuestionId, @AnswerId, @ChatTitle, @InsertOp, @InsertDt, NULL, NULL, @OriginCode, 0);
             """;
 
         await using var command = new SqlCommand(sql, connection, transaction);
@@ -645,6 +654,13 @@ public class DbServices : IDbServices
         command.Parameters.Add("@InsertDt", SqlDbType.DateTime2).Value = now;
         command.Parameters.Add("@OriginCode", SqlDbType.VarChar, 50).Value = originCode;
         await command.ExecuteNonQueryAsync();
+    }
+
+    private static DateTime? ReadUtcDateTime(SqlDataReader reader, int ordinal)
+    {
+        return reader.IsDBNull(ordinal)
+            ? null
+            : DateTime.SpecifyKind(reader.GetDateTime(ordinal), DateTimeKind.Utc);
     }
 
     private sealed record ConversationState(string Account, bool IsDeleted);

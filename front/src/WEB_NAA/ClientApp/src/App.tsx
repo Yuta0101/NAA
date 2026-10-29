@@ -1,11 +1,11 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useState } from "react";
-import { authenticateUser, getSessionAccount, logoutUser } from "./api/ddm";
+import { authenticateCard, authenticateUser, getSessionAccount, logoutUser } from "./api/ddm";
 import type { AppTheme } from "./components/AnimatedThemeToggler";
 import { NaaIcon } from "./components/NaaIcon";
 
-const ChatPage = lazy(() =>
-  import("./components/ChatPage").then((module) => ({ default: module.ChatPage })),
-);
+const loadChatPage = () =>
+  import("./components/ChatPage").then((module) => ({ default: module.ChatPage }));
+const ChatPage = lazy(loadChatPage);
 const LoginPage = lazy(() =>
   import("./components/LoginPage").then((module) => ({ default: module.LoginPage })),
 );
@@ -52,7 +52,15 @@ export default function App() {
   }, [theme]);
 
   async function login(value: string, password: string) {
+    // Load the authenticated screen while the credential request is in flight.
+    void loadChatPage();
     const authenticatedAccount = await authenticateUser(value, password);
+    setAccount(authenticatedAccount);
+  }
+
+  async function loginWithCard(cardUid: string) {
+    void loadChatPage();
+    const authenticatedAccount = await authenticateCard(cardUid);
     setAccount(authenticatedAccount);
   }
 
@@ -83,7 +91,7 @@ export default function App() {
           onLogout={logout}
         />
       ) : (
-        <LoginPage onLogin={login} />
+        <LoginPage onLogin={login} onCardLogin={loginWithCard} />
       )}
     </Suspense>
   );

@@ -2,15 +2,18 @@ using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.HttpOverrides;
 
 var builder = WebApplication.CreateBuilder(args);
+var webJsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
 
 var ddmBaseUrl = builder.Configuration["Ddm:BaseUrl"]
     ?? Environment.GetEnvironmentVariable("DDM_BASE_URL")
     ?? "https://localhost:7079";
+var ddmTimeoutSeconds = builder.Configuration.GetValue("Ddm:TimeoutSeconds", 150);
 
 if (!Uri.TryCreate(ddmBaseUrl, UriKind.Absolute, out var ddmBaseUri))
     throw new InvalidOperationException($"Ddm:BaseUrl 不是有效網址：{ddmBaseUrl}");
@@ -26,7 +29,7 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 builder.Services.AddHttpClient("DDM", client =>
 {
     client.BaseAddress = ddmBaseUri;
-    client.Timeout = TimeSpan.FromSeconds(20);
+    client.Timeout = TimeSpan.FromSeconds(Math.Clamp(ddmTimeoutSeconds, 30, 300));
 });
 builder.Services
     .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
@@ -50,6 +53,31 @@ builder.Services
         };
     });
 builder.Services.AddAuthorization();
+// A card UID is not a secret, so both login endpoints are limited per client
+// address to slow down anyone trying to guess bound UIDs.
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.OnRejected = async (context, cancellationToken) =>
+    {
+        await context.HttpContext.Response.WriteAsJsonAsync(
+            new { message = "嘗試次數過多，請稍後再試。" },
+            cancellationToken);
+    };
+    options.AddPolicy("login", httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+});
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+});
 
 var app = builder.Build();
 
@@ -62,10 +90,22 @@ if (!app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
+app.UseResponseCompression();
 app.UseDefaultFiles();
-app.UseStaticFiles();
+app.UseStaticFiles(new StaticFileOptions
+{
+    OnPrepareResponse = context =>
+    {
+        if (context.Context.Request.Path.StartsWithSegments("/assets"))
+        {
+            context.Context.Response.Headers.CacheControl =
+                "public,max-age=31536000,immutable";
+        }
+    }
+});
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 
 app.MapPost("/auth/login", async (
     LoginRequest request,
@@ -85,10 +125,7 @@ app.MapPost("/auth/login", async (
         if (!response.IsSuccessStatusCode)
             return Results.Json(new { message = "登入服務暫時無法使用。" }, statusCode: StatusCodes.Status502BadGateway);
 
-        var loginResult = JsonSerializer.Deserialize<LoginEnvelope>(body, new JsonSerializerOptions
-        {
-            PropertyNameCaseInsensitive = true
-        });
+        var loginResult = JsonSerializer.Deserialize<LoginEnvelope>(body, webJsonOptions);
         var account = loginResult?.Results.FirstOrDefault()?.Account?.Trim();
 
         if (loginResult?.Status != 1 || string.IsNullOrWhiteSpace(account))
@@ -98,18 +135,7 @@ app.MapPost("/auth/login", async (
                 statusCode: StatusCodes.Status401Unauthorized);
         }
 
-        var identity = new ClaimsIdentity(
-            new[] { new Claim(ClaimTypes.Name, account) },
-            CookieAuthenticationDefaults.AuthenticationScheme);
-        await context.SignInAsync(
-            CookieAuthenticationDefaults.AuthenticationScheme,
-            new ClaimsPrincipal(identity),
-            new AuthenticationProperties
-            {
-                IsPersistent = false,
-                ExpiresUtc = DateTimeOffset.UtcNow.AddHours(8)
-            });
-
+        await SignInAccountAsync(context, account);
         return Results.Ok(new { account });
     }
     catch (HttpRequestException)
@@ -118,7 +144,49 @@ app.MapPost("/auth/login", async (
             new { message = "無法連線到登入服務，請確認 API 與 DDM 已啟動。" },
             statusCode: StatusCodes.Status502BadGateway);
     }
-});
+})
+.RequireRateLimiting("login");
+
+app.MapPost("/auth/card-login", async (
+    CardLoginRequest request,
+    HttpContext context,
+    IHttpClientFactory httpClientFactory,
+    CancellationToken cancellationToken) =>
+{
+    var cardUid = request.CardUid?.Trim();
+    if (string.IsNullOrEmpty(cardUid) || cardUid.Length > 32)
+        return Results.BadRequest(new { message = "無法辨識卡片內容，請重新感應。" });
+
+    try
+    {
+        var client = httpClientFactory.CreateClient("DDM");
+        using var response = await client.PostAsJsonAsync("CardLogin", new { cardUid }, cancellationToken);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+            return Results.Json(new { message = "登入服務暫時無法使用。" }, statusCode: StatusCodes.Status502BadGateway);
+
+        var loginResult = JsonSerializer.Deserialize<LoginEnvelope>(body, webJsonOptions);
+        var account = loginResult?.Results.FirstOrDefault()?.Account?.Trim();
+
+        if (loginResult?.Status != 1 || string.IsNullOrWhiteSpace(account))
+        {
+            return Results.Json(
+                new { message = loginResult?.Description ?? "此卡片尚未綁定帳號。" },
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        await SignInAccountAsync(context, account);
+        return Results.Ok(new { account });
+    }
+    catch (HttpRequestException)
+    {
+        return Results.Json(
+            new { message = "無法連線到登入服務，請確認 API 與 DDM 已啟動。" },
+            statusCode: StatusCodes.Status502BadGateway);
+    }
+})
+.RequireRateLimiting("login");
 
 app.MapGet("/auth/session", (ClaimsPrincipal user) =>
     Results.Ok(new { account = user.Identity!.Name }))
@@ -143,7 +211,10 @@ app.MapPost("/ddm/{endpoint}", async (
         "GetConversationSummaries" or
         "GetConversationById" or
         "SoftDeleteConversation" or
-        "RestoreConversation"))
+        "RestoreConversation" or
+        "GetCards" or
+        "BindCard" or
+        "UnbindCard"))
         return Results.NotFound();
 
     try
@@ -204,7 +275,24 @@ app.MapFallbackToFile("index.html");
 
 app.Run();
 
+static async Task SignInAccountAsync(HttpContext context, string account)
+{
+    var identity = new ClaimsIdentity(
+        new[] { new Claim(ClaimTypes.Name, account) },
+        CookieAuthenticationDefaults.AuthenticationScheme);
+    await context.SignInAsync(
+        CookieAuthenticationDefaults.AuthenticationScheme,
+        new ClaimsPrincipal(identity),
+        new AuthenticationProperties
+        {
+            IsPersistent = false,
+            ExpiresUtc = DateTimeOffset.UtcNow.AddHours(8)
+        });
+}
+
 sealed record LoginRequest(string Account, string Password);
+
+sealed record CardLoginRequest(string? CardUid);
 
 sealed class LoginEnvelope
 {

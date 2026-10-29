@@ -10,6 +10,27 @@ namespace API_NAA_DDM.Services;
 
 public sealed class AgentBuilderService : IAgentService
 {
+    private const string NoKnowledgeBaseDataMessage = "目前知識庫無資料";
+    private static readonly string[] NoKnowledgeBaseDataSignals =
+    [
+        NoKnowledgeBaseDataMessage,
+        "未檢索到與此問題直接相關",
+        "未檢索到相關內容",
+        "目前知識庫未提供",
+        "知識庫中沒有相關",
+        "知識庫沒有相關",
+        "知識庫未找到",
+        "知識庫中未找到",
+        "知識庫中查無",
+        "無法在知識庫中找到",
+        "無法根據目前知識庫回答",
+        "無法回答此問題",
+        "沒有足夠的資料回答",
+        "找不到相關資料",
+        "查無相關資料",
+        "知識庫無相關資料"
+    ];
+
     private readonly HttpClient _client;
     private readonly AgentOptions _options;
     private readonly ILogger<AgentBuilderService> _logger;
@@ -31,11 +52,33 @@ public sealed class AgentBuilderService : IAgentService
         if (string.IsNullOrWhiteSpace(request.InputText))
             throw new AgentServiceException("請輸入問題。");
 
+        var result = await SendMessageAsync(
+            request.InputText.Trim(),
+            request.AgentThreadId ?? string.Empty,
+            request.UserId,
+            cancellationToken);
+
+        var answer = result.Answer?.Trim();
+        if (string.IsNullOrWhiteSpace(answer))
+            answer = NoKnowledgeBaseDataMessage;
+
+        if (IsNoKnowledgeBaseDataAnswer(answer))
+            answer = NoKnowledgeBaseDataMessage;
+
+        return new AgentMessageResponse(answer, result.ConversationId);
+    }
+
+    private async Task<AgentBuilderChatResponse> SendMessageAsync(
+        string query,
+        string conversationId,
+        string userId,
+        CancellationToken cancellationToken)
+    {
         var payload = new AgentBuilderChatRequest
         {
-            Query = request.InputText.Trim(),
-            ConversationId = request.AgentThreadId ?? string.Empty,
-            User = request.UserId,
+            Query = query,
+            ConversationId = conversationId,
+            User = userId,
             ResponseMode = "blocking"
         };
 
@@ -56,13 +99,9 @@ public sealed class AgentBuilderService : IAgentService
                 throw new AgentServiceException($"醫院 Agent 回應 HTTP {(int)response.StatusCode}。");
             }
 
-            var result = await response.Content.ReadFromJsonAsync<AgentBuilderChatResponse>(
-                cancellationToken: cancellationToken);
-
-            if (string.IsNullOrWhiteSpace(result?.Answer))
-                throw new AgentServiceException("醫院 Agent 沒有回傳回答內容。");
-
-            return new AgentMessageResponse(result.Answer, result.ConversationId);
+            return await response.Content.ReadFromJsonAsync<AgentBuilderChatResponse>(
+                       cancellationToken: cancellationToken)
+                   ?? throw new AgentServiceException("醫院 Agent 回傳空白資料。");
         }
         catch (AgentServiceException)
         {
@@ -77,6 +116,13 @@ public sealed class AgentBuilderService : IAgentService
             _logger.LogWarning(ex, "AgentBuilder connection failed");
             throw new AgentServiceException("無法連線到醫院 Agent，請確認院內網路或 VPN 與 DNS。");
         }
+    }
+
+    private static bool IsNoKnowledgeBaseDataAnswer(string answer)
+    {
+        return answer.Length <= 500
+            && NoKnowledgeBaseDataSignals.Any(signal =>
+                answer.Contains(signal, StringComparison.OrdinalIgnoreCase));
     }
 
     private sealed class AgentBuilderChatRequest

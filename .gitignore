@@ -3,5 +3,7 @@
 **/obj/
 **/node_modules/
 **/ClientApp/dist/
+NAA.local.txt
+.pnpm-store/
 *.user
 *.suo

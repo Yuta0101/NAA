@@ -65,16 +65,18 @@ export const LogoLoop = memo(function LogoLoop({
   const sequenceRef = useRef<HTMLUListElement>(null);
   const [sequenceWidth, setSequenceWidth] = useState(0);
   const [copyCount, setCopyCount] = useState(MIN_COPIES);
-  const [hovered, setHovered] = useState(false);
+  const hoveredRef = useRef(false);
 
   const updateDimensions = useCallback(() => {
     const containerWidth = containerRef.current?.clientWidth ?? 0;
     const width = Math.ceil(sequenceRef.current?.getBoundingClientRect().width ?? 0);
     if (!width) return;
-    setSequenceWidth(width);
-    setCopyCount(
-      Math.max(MIN_COPIES, Math.ceil(containerWidth / width) + COPY_HEADROOM),
+    const nextCopyCount = Math.max(
+      MIN_COPIES,
+      Math.ceil(containerWidth / width) + COPY_HEADROOM,
     );
+    setSequenceWidth((current) => (current === width ? current : width));
+    setCopyCount((current) => (current === nextCopyCount ? current : nextCopyCount));
   }, []);
 
   useEffect(() => {
@@ -97,6 +99,8 @@ export const LogoLoop = memo(function LogoLoop({
     let lastTimestamp: number | null = null;
     let offset = 0;
     let velocity = 0;
+    let visible = true;
+    let documentVisible = !document.hidden;
     const baseVelocity = Math.abs(speed) * (direction === "left" ? 1 : -1);
     const hoverVelocity = hoverSpeed ?? (pauseOnHover ? 0 : baseVelocity);
 
@@ -104,16 +108,47 @@ export const LogoLoop = memo(function LogoLoop({
       if (lastTimestamp === null) lastTimestamp = timestamp;
       const delta = Math.max(0, timestamp - lastTimestamp) / 1000;
       lastTimestamp = timestamp;
-      const targetVelocity = hovered ? hoverVelocity : baseVelocity;
+      const targetVelocity = hoveredRef.current ? hoverVelocity : baseVelocity;
       velocity += (targetVelocity - velocity) * (1 - Math.exp(-delta / SMOOTH_TAU));
       offset = ((offset + velocity * delta) % sequenceWidth + sequenceWidth) % sequenceWidth;
       track.style.transform = `translate3d(${-offset}px, 0, 0)`;
       animationFrame = requestAnimationFrame(animate);
     };
 
-    animationFrame = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(animationFrame);
-  }, [direction, hoverSpeed, hovered, pauseOnHover, sequenceWidth, speed]);
+    const start = () => {
+      if (visible && documentVisible && animationFrame === 0) {
+        lastTimestamp = null;
+        animationFrame = requestAnimationFrame(animate);
+      }
+    };
+    const stop = () => {
+      if (animationFrame === 0) return;
+      cancelAnimationFrame(animationFrame);
+      animationFrame = 0;
+      lastTimestamp = null;
+    };
+
+    const observer = new IntersectionObserver(([entry]) => {
+      visible = entry.isIntersecting;
+      if (visible) start();
+      else stop();
+    });
+    observer.observe(track);
+
+    const onVisibilityChange = () => {
+      documentVisible = !document.hidden;
+      if (documentVisible) start();
+      else stop();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    start();
+
+    return () => {
+      stop();
+      observer.disconnect();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [direction, hoverSpeed, pauseOnHover, sequenceWidth, speed]);
 
   const rootClassName = [
     "logoloop",
@@ -143,8 +178,9 @@ export const LogoLoop = memo(function LogoLoop({
         src={item.src}
         alt={item.alt}
         title={item.title ?? item.alt}
-        loading="eager"
+        loading="lazy"
         decoding="async"
+        fetchPriority="low"
         draggable={false}
       />
     );
@@ -180,8 +216,12 @@ export const LogoLoop = memo(function LogoLoop({
       <div
         className="logoloop__track"
         ref={trackRef}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
+        onMouseEnter={() => {
+          hoveredRef.current = true;
+        }}
+        onMouseLeave={() => {
+          hoveredRef.current = false;
+        }}
       >
         {Array.from({ length: copyCount }, (_, copyIndex) => (
           <ul

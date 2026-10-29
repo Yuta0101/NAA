@@ -31,6 +31,12 @@ export interface ConversationSummary {
   deletedBy?: string;
 }
 
+export interface BoundCard {
+  cardId: string;
+  maskedUid: string;
+  boundAt?: Date;
+}
+
 export interface ReviseRequest {
   conversationId: string;
   chatTitle: string;

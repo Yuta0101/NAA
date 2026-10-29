@@ -23,6 +23,10 @@ export default defineConfig(({ mode }) => {
       strictPort: true,
     },
     build: {
+      // WEB_NAA serves static files from wwwroot. Building directly there keeps
+      // the deployed assets in sync with the React source.
+      outDir: "../wwwroot",
+      emptyOutDir: true,
       // Three.js is intentionally bundled for the interactive Liquid Ether login.
       chunkSizeWarningLimit: 600,
     },

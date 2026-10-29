@@ -9,6 +9,8 @@ namespace API_NAA_DDM.Services;
 
 public class NaaHttpServices : INaaHttpServices
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
     private readonly HttpClient _client;
     private readonly IAgentService _agentService;
     private readonly ILogger<NaaHttpServices> _logger;
@@ -188,7 +190,7 @@ public class NaaHttpServices : INaaHttpServices
                 return GenerateErrorResponse<TResponse>($"NAA API returned {response.StatusCode}");
 
             var result = await response.Content.ReadFromJsonAsync<ResponseModel<TResponse>>(
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                JsonOptions);
 
             return result ?? GenerateErrorResponse<TResponse>("NAA API returned an empty response");
         }
@@ -205,8 +207,8 @@ public class NaaHttpServices : INaaHttpServices
         {
             UniqueId = string.IsNullOrWhiteSpace(account) ? Guid.NewGuid().ToString() : account,
             UserAccount1 = string.IsNullOrWhiteSpace(account) ? "local.user" : account,
-            InsertDt = DateTime.Now,
-            UpdateDt = DateTime.Now
+            InsertDt = DateTime.UtcNow,
+            UpdateDt = null
         };
 
         return new[] { user }.ToResponse(description, "No local user data");

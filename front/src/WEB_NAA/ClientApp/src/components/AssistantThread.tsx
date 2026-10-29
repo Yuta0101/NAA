@@ -67,7 +67,7 @@ function Welcome({ account }: AssistantThreadProps) {
             <ThreadPrimitive.Suggestion
               key={prompt}
               prompt={prompt}
-              send={false}
+              send
               className="suggestion-card micro-button"
             >
               <span>
@@ -308,9 +308,16 @@ export function AssistantThread({ account }: AssistantThreadProps) {
           <Welcome account={account} />
           <div className="message-list">
             <ThreadPrimitive.Messages>
-              {({ message }) =>
-                message.role === "user" ? <UserMessage /> : <AssistantMessage />
-              }
+              {({ message }) => {
+                if (message.role === "user") return <UserMessage />;
+
+                // assistant-ui inserts an optimistic assistant message while a
+                // request is running. Keep it hidden so the dedicated animated
+                // three-dot row is the only pending-response indicator.
+                if (message.status?.type !== "complete") return null;
+
+                return <AssistantMessage />;
+              }}
             </ThreadPrimitive.Messages>
             <ThinkingMessage />
           </div>

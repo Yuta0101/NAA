@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NFC 刷卡量測</title>
+<style>
+  :root { --bg:#f6f5fb; --card:#fff; --ink:#1f1d2b; --muted:#6b6880; --accent:#b0479f; --ok:#1f8a4c; --warn:#b26a00; --line:#e4e1ee; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: "Microsoft JhengHei", system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { margin: 0 0 4px; font-size: 22px; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: 14px; }
+  .tap { background: var(--card); border: 2px dashed var(--accent); border-radius: 16px; padding: 28px; text-align: center; margin-bottom: 16px; transition: background .2s; }
+  .tap.flash { background: #fbe9f7; }
+  .tap b { font-size: 20px; color: var(--accent); }
+  .tap .live { font-family: Consolas, monospace; font-size: 26px; margin-top: 10px; min-height: 34px; letter-spacing: 1px; }
+  .focus-warn { color: var(--warn); font-weight: bold; display: none; margin-top: 8px; }
+  .row { display:flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .table-wrap { overflow-x: auto; background: var(--card); border-radius: 12px; border: 1px solid var(--line); }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+  th { background: #faf9fd; color: var(--muted); font-weight: normal; }
+  td.mono { font-family: Consolas, monospace; }
+  .tag { display:inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; }
+  .tag.card { background:#e3f4ea; color: var(--ok); }
+  .tag.human { background:#fff1dc; color: var(--warn); }
+  textarea { width: 100%; height: 160px; margin-top: 12px; font-family: Consolas, monospace; font-size: 12px; border-radius: 8px; border: 1px solid var(--line); padding: 8px; }
+  .steps { background: var(--card); border-radius: 12px; border: 1px solid var(--line); padding: 12px 18px; margin-bottom: 16px; font-size: 14px; }
+  .steps li { margin: 4px 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>NFC 刷卡量測</h1>
+  <p class="sub">記錄讀卡機透過 Citrix 送進來的每個按鍵與時間間隔，用來決定正式版的判斷規則。不會連線到任何伺服器。</p>
+
+  <ol class="steps">
+    <li>用同一張卡刷 <b>5 次</b>（每次間隔一兩秒）。</li>
+    <li>換另一張卡再刷 <b>2 次</b>（若有第二張卡）。</li>
+    <li>把 VM 切到<b>中文輸入法</b>，再刷 <b>2 次</b>。</li>
+    <li>自己用鍵盤手打一串數字再按 Enter，做為「人手打字」對照。</li>
+    <li>按「複製結果」，把內容貼回對話給 Claude。</li>
+  </ol>
+
+  <div class="tap" id="tap">
+    <b>請感應卡片</b>
+    <div class="live" id="live">&nbsp;</div>
+    <div class="focus-warn" id="focusWarn">⚠ 這個頁面目前沒有焦點，請先點一下頁面再刷卡</div>
+  </div>
+
+  <div class="row">
+    <button class="primary" id="copyBtn">複製結果</button>
+    <button id="clearBtn">清除</button>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th><th>判斷</th><th>依 key 讀到</th><th>依 code 讀到</th><th>長度</th><th>結尾</th>
+          <th>間隔 最小/平均/最大 (ms)</th><th>總時間 (ms)</th><th>輸入法</th><th>格式換算</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <textarea id="out" readonly placeholder="按「複製結果」後內容會出現在這裡（若無法自動複製，可手動全選複製）"></textarea>
+</main>
+
+<script>
+(function () {
+  // A new burst starts when the gap since the previous key exceeds this value.
+  // Deliberately generous so Citrix latency cannot split one card read in two.
+  var BURST_GAP_MS = 400;
+
+  var bursts = [];
+  var current = null;
+  var finalizeTimer = null;
+
+  var liveEl = document.getElementById("live");
+  var rowsEl = document.getElementById("rows");
+  var tapEl = document.getElementById("tap");
+  var outEl = document.getElementById("out");
+  var focusWarn = document.getElementById("focusWarn");
+
+  function codeToChar(code, shift) {
+    if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+    if (/^Numpad[0-9]$/.test(code)) return code.slice(6);
+    if (/^Key[A-Z]$/.test(code)) return shift ? code.slice(3) : code.slice(3).toLowerCase();
+    if (code === "Minus" || code === "NumpadSubtract") return "-";
+    if (code === "Semicolon") return shift ? ":" : ";";
+    if (code === "Space") return " ";
+    return "";
+  }
+
+  function isTerminator(e) {
+    return e.code === "Enter" || e.code === "NumpadEnter" || e.key === "Enter" || e.code === "Tab";
+  }
+
+  function formats(raw) {
+    var s = raw.trim();
+    var notes = [];
+    if (/^[0-9]+$/.test(s)) {
+      notes.push("十進位");
+      try {
+        var n = BigInt(s);
+        var hex = n.toString(16).toUpperCase();
+        if (hex.length % 2) hex = "0" + hex;
+        var bytes = hex.match(/../g) || [];
+        notes.push("HEX=" + hex);
+        if (bytes.length > 1) notes.push("反序HEX=" + bytes.slice().reverse().join(""));
+      } catch (e) { /* BigInt unsupported */ }
+    }
+    if (/^[0-9A-Fa-f]+$/.test(s) && /[A-Fa-f]/.test(s)) notes.push("十六進位");
+    if (/^[0-9A-Fa-f]+$/.test(s) && s.length % 2 === 0 && (/[A-Fa-f]/.test(s) || s.length === 8 || s.length === 14)) {
+      var b = s.toUpperCase().match(/../g) || [];
+      try {
+        notes.push("DEC=" + BigInt("0x" + b.join("")).toString());
+        if (b.length > 1) notes.push("反序DEC=" + BigInt("0x" + b.slice().reverse().join("")).toString());
+      } catch (e) { /* ignore */ }
+    }
+    return notes.join("  ");
+  }
+
+  function finalize() {
+    if (!current) return;
+    var b = current;
+    current = null;
+    clearTimeout(finalizeTimer);
+    if (!b.events.length) return;
+
+    var gaps = [];
+    for (var i = 1; i < b.events.length; i++) gaps.push(b.events[i].t - b.events[i - 1].t);
+    var min = gaps.length ? Math.min.apply(null, gaps) : 0;
+    var max = gaps.length ? Math.max.apply(null, gaps) : 0;
+    var avg = gaps.length ? gaps.reduce(function (a, c) { return a + c; }, 0) / gaps.length : 0;
+
+    b.stats = {
+      byKey: b.events.filter(function (e) { return !e.term; }).map(function (e) { return e.key.length === 1 ? e.key : "[" + e.key + "]"; }).join(""),
+      byCode: b.events.filter(function (e) { return !e.term; }).map(function (e) { return codeToChar(e.code, e.shift); }).join(""),
+      length: b.events.filter(function (e) { return !e.term; }).length,
+      terminator: b.events.some(function (e) { return e.term; }) ? b.events.filter(function (e) { return e.term; })[0].code : "(無)",
+      gapMin: Math.round(min), gapAvg: Math.round(avg), gapMax: Math.round(max),
+      total: Math.round(b.events[b.events.length - 1].t - b.events[0].t),
+      ime: b.events.some(function (e) { return e.ime; }) ? "有 (Process/組字)" : "無",
+      codes: b.events.map(function (e) { return e.code; }).join(" ")
+    };
+    // Heuristic preview only; the real threshold is decided from these numbers.
+    b.stats.guess = (b.stats.length >= 4 && b.stats.gapAvg < 60) ? "刷卡?" : "手打?";
+    b.stats.formats = formats(b.stats.byCode || b.stats.byKey);
+    bursts.push(b);
+    render();
+    liveEl.innerHTML = "&nbsp;";
+    tapEl.classList.add("flash");
+    setTimeout(function () { tapEl.classList.remove("flash"); }, 300);
+  }
+
+  function render() {
+    rowsEl.innerHTML = "";
+    bursts.forEach(function (b, idx) {
+      var s = b.stats;
+      var tr = document.createElement("tr");
+      function td(text, cls) { var c = document.createElement("td"); c.textContent = text; if (cls) c.className = cls; tr.appendChild(c); }
+      td(String(idx + 1));
+      var tagTd = document.createElement("td");
+      var tag = document.createElement("span");
+      tag.className = "tag " + (s.guess === "刷卡?" ? "card" : "human");
+      tag.textContent = s.guess;
+      tagTd.appendChild(tag); tr.appendChild(tagTd);
+      td(s.byKey, "mono"); td(s.byCode, "mono"); td(String(s.length)); td(s.terminator);
+      td(s.gapMin + " / " + s.gapAvg + " / " + s.gapMax, "mono"); td(String(s.total), "mono");
+      td(s.ime); td(s.formats, "mono");
+      rowsEl.appendChild(tr);
+    });
+  }
+
+  document.addEventListener("keydown", function (e) {
+    var now = performance.now();
+    if (current && now - current.last > BURST_GAP_MS) finalize();
+    if (!current) current = { events: [], last: now };
+
+    var term = isTerminator(e);
+    current.events.push({
+      t: now, key: e.key, code: e.code, shift: e.shiftKey, term: term,
+      ime: e.isComposing || e.key === "Process" || e.keyCode === 229
+    });
+    current.last = now;
+    if (e.key === "Tab" || e.key === "Enter") e.preventDefault();
+
+    liveEl.textContent = current.events.filter(function (x) { return !x.term; }).map(function (x) { return codeToChar(x.code, x.shift) || "·"; }).join("") || " ";
+
+    clearTimeout(finalizeTimer);
+    if (term) finalize();
+    else finalizeTimer = setTimeout(finalize, BURST_GAP_MS);
+  }, true);
+
+  function updateFocus() { focusWarn.style.display = document.hasFocus() ? "none" : "block"; }
+  window.addEventListener("focus", updateFocus);
+  window.addEventListener("blur", updateFocus);
+  setInterval(updateFocus, 1000);
+  updateFocus();
+
+  function report() {
+    var lines = ["NFC probe result", "UA: " + navigator.userAgent, ""];
+    bursts.forEach(function (b, i) {
+      var s = b.stats;
+      lines.push("#" + (i + 1) + " guess=" + s.guess + " key=" + s.byKey + " code=" + s.byCode +
+        " len=" + s.length + " end=" + s.terminator + " gap(min/avg/max)=" + s.gapMin + "/" + s.gapAvg + "/" + s.gapMax +
+        " total=" + s.total + " ime=" + s.ime + " | " + s.formats);
+      lines.push("   codes: " + s.codes);
+    });
+    return lines.join("\n");
+  }
+
+  document.getElementById("copyBtn").addEventListener("click", function () {
+    var text = report();
+    outEl.value = text;
+    outEl.focus(); outEl.select();
+    try {
+      if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text);
+      else document.execCommand("copy");
+    } catch (e) { /* user can copy manually from the textarea */ }
+    outEl.blur();
+  });
+
+  document.getElementById("clearBtn").addEventListener("click", function () {
+    bursts = []; current = null; rowsEl.innerHTML = ""; outEl.value = ""; liveEl.innerHTML = "&nbsp;";
+  });
+})();
+</script>
+</body>
+</html>
